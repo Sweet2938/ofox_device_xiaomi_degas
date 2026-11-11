@@ -47,6 +47,14 @@ jobs:
       ROM_NAME: ${{ inputs.rom_name }}
 
     steps:
+      - name: Free up disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
+
       - name: Check out the fork
         uses: actions/checkout@v4
         with:
@@ -64,14 +72,12 @@ jobs:
             libncurses5-dev libncurses-dev libssl-dev libxml2-utils lz4 \
             pngcrush python3 rsync schedtool squashfs-tools unzip xsltproc \
             zip zlib1g-dev
-
       - name: Install repo
         shell: bash
         run: |
           sudo curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
             -o /usr/local/bin/repo
           sudo chmod 0755 /usr/local/bin/repo
-
       - name: Sync OrangeFox source
         shell: bash
         run: |
@@ -79,7 +85,6 @@ jobs:
           cd "$GITHUB_WORKSPACE/orangefox"
           repo init --depth=1 -u "$FOX_MANIFEST_URL" -b "$FOX_MANIFEST_BRANCH"
           repo sync -c --no-clone-bundle --no-tags -j"$(nproc --all)"
-
       - name: Install this device tree
         shell: bash
         run: |
@@ -87,22 +92,23 @@ jobs:
           mkdir -p "$(dirname "$tree")"
           rm -rf "$tree"
           mkdir -p "$tree"
+          # The synced OrangeFox source lives inside the workspace, so it must be
+          # excluded here or the whole source tree gets copied into the device tree.
           rsync -a --exclude .git --exclude .github --exclude rom-blobs \
+            --exclude /orangefox \
             "$GITHUB_WORKSPACE/" "$tree/"
-
+          df -h /
       - name: Overlay ROM blobs from the fork
         shell: bash
         run: |
           set -euo pipefail
           tree="$GITHUB_WORKSPACE/orangefox/device/xiaomi/degas"
-
           # Put ROM-specific files in rom-blobs/ in the fork using paths relative
           # to device/xiaomi/degas. The directory is optional.
           if [ -d "$GITHUB_WORKSPACE/rom-blobs" ]; then
             rsync -a --exclude README.md \
               "$GITHUB_WORKSPACE/rom-blobs/" "$tree/"
           fi
-
           url='${{ inputs.blob_archive_url }}'
           if [ -n "$url" ]; then
             archive="$RUNNER_TEMP/rom-blobs"
@@ -117,7 +123,6 @@ jobs:
             esac
             rsync -a "$RUNNER_TEMP/blob-extract/" "$tree/"
           fi
-
       - name: Apply device patches
         shell: bash
         working-directory: orangefox
@@ -133,7 +138,6 @@ jobs:
               exit 1
             fi
           done
-
       - name: Download matching vendor_boot
         shell: bash
         run: |
@@ -152,7 +156,6 @@ jobs:
           if [ -n '${{ inputs.vendor_boot_sha256 }}' ]; then
             echo '${{ inputs.vendor_boot_sha256 }}  '"$tree/ofox_degas-vendor_boot.img" | sha256sum -c -
           fi
-
       - name: Build OrangeFox vendor_boot
         working-directory: orangefox
         shell: bash
@@ -161,7 +164,6 @@ jobs:
           source build/envsetup.sh
           lunch ofox_degas-bp2a-eng
           mka vendorbootimage
-
       - name: Prepare repack inputs
         shell: bash
         run: |
@@ -175,7 +177,12 @@ jobs:
             test -f "$tree/$file"
           done
           test -f "$tree/xiaomi_touch_common_patched.ko"
-
+          # patch_touch_clean.sh reads the freshly built image from ./out/... in its
+          # working directory, so make it available there.
+          built="$GITHUB_WORKSPACE/orangefox/out/target/product/degas/vendor_boot.img"
+          test -f "$built"
+          mkdir -p "$tree/out/target/product/degas"
+          cp "$built" "$tree/out/target/product/degas/vendor_boot.img"
       - name: Repack flashable vendor_boot
         working-directory: orangefox/device/xiaomi/degas
         shell: bash
@@ -183,7 +190,6 @@ jobs:
           set -euo pipefail
           export PATH="$GITHUB_WORKSPACE/orangefox/out/host/linux-x86/bin:$PATH"
           bash patch_touch_clean.sh
-
       - name: Generate checksums
         working-directory: orangefox/device/xiaomi/degas
         shell: bash
@@ -191,7 +197,6 @@ jobs:
           sha256sum ofox_degas-vendor_boot-clean.img \
             "$GITHUB_WORKSPACE/orangefox/out/target/product/degas/vendor_boot.img" \
             > SHA256SUMS
-
       - name: Upload recovery images
         uses: actions/upload-artifact@v4
         with:
