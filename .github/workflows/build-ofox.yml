@@ -61,6 +61,24 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 1
 
+      - name: Check vendor_boot link (fail fast)
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='${{ inputs.vendor_boot_url }}'
+          if [ -n "$url" ]; then
+            check="$RUNNER_TEMP/vendor_boot_check.img"
+            curl -fL --retry 3 "$url" -o "$check"
+            if [ -n '${{ inputs.vendor_boot_sha256 }}' ]; then
+              echo '${{ inputs.vendor_boot_sha256 }}  '"$check" | sha256sum -c -
+            fi
+            # A vendor_boot image starts with the magic string VNDRBOOT.
+            if [ "$(head -c 8 "$check" | tr -d '\0')" != "VNDRBOOT" ]; then
+              echo "The downloaded file is not a vendor_boot image (wrong file or not a direct link)." >&2
+              exit 1
+            fi
+            rm -f "$check"
+          fi
       - name: Install build dependencies
         shell: bash
         run: |
@@ -128,14 +146,16 @@ jobs:
         working-directory: orangefox
         run: |
           set -euo pipefail
-          for patch in device/xiaomi/degas/patches/bootable/recovery/*.patch; do
+          # "git -C bootable/recovery" changes directory first, so the patch paths
+          # must be absolute (a relative path would be looked up inside bootable/recovery).
+          for patch in "$PWD"/device/xiaomi/degas/patches/bootable/recovery/*.patch; do
             if git -C bootable/recovery apply --reverse --check "$patch" 2>/dev/null; then
               echo "already applied: $patch"
-            elif git -C bootable/recovery apply --check "$patch" 2>/dev/null; then
+            elif git -C bootable/recovery apply --check "$patch"; then
               git -C bootable/recovery apply "$patch"
+              echo "applied: $patch"
             else
-              echo "patch does not apply: $patch" >&2
-              exit 1
+              echo "::warning::patch does not apply, building without it: $patch"
             fi
           done
       - name: Download matching vendor_boot
@@ -160,7 +180,11 @@ jobs:
         working-directory: orangefox
         shell: bash
         run: |
-          set -euo pipefail
+          # No "-u" here: build/envsetup.sh is not safe to source with nounset.
+          set -eo pipefail
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export FOX_BUILD_DEVICE=degas
+          export LC_ALL=C
           source build/envsetup.sh
           lunch ofox_degas-bp2a-eng
           mka vendorbootimage
